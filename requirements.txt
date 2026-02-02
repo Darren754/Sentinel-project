@@ -1,0 +1,4 @@
+# fill this with the packages you actually import in sentinel.py
+# examples:
+# opencv-python
+# numpy
