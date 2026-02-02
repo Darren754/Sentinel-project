@@ -1,18 +1,69 @@
 # Sentinel-project
 
-Mobile robot project with face recognition.
+Mobile robot project with motion tracking, LED "eye," servo scanning, and optional LBPH face recognition. The main entry point is `sentinel.py`.
+
+## Features
+- Motion detection with servo tracking and LED feedback.
+- Optional LBPH face recognition using OpenCV contrib.
+- Dataset utilities: capture, scan, and train helpers.
+- Simulation mode to run without Raspberry Pi hardware.
 
 ## Requirements
-- Python 3.x
+- Python 3.9+ recommended
+- Optional Raspberry Pi hardware libraries (see Hardware setup)
 
 ## Setup
+```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
 
 ## Run
+```bash
 python sentinel.py
+```
+
+## Usage
+### Simulation (no Pi hardware)
+```bash
+python sentinel.py --simulate --duration 60
+```
+
+### Face recognition (requires trained model)
+```bash
+python sentinel.py --enable-face --model ./face_model.yml --labels ./face_labels.json
+```
+
+### Dataset utilities
+```bash
+# Capture faces (Pi camera)
+python sentinel.py capture-face --name Darren --count 25 --out ./faces
+
+# Scan for bad images (optional auto-move)
+python sentinel.py scan-faces --dataset ./faces --move-bad
+
+# Train LBPH model/labels
+python sentinel.py train-lbph --dataset ./faces --model-out ./face_model.yml --labels-out ./face_labels.json
+```
+
+Backward-compatible capture flags:
+```bash
+python sentinel.py --capture-face Darren --capture-count 25 --capture-out ./faces
+```
+
+## Hardware setup (Raspberry Pi)
+Install hardware-specific packages on the Pi (often via apt/pip):
+- `picamera2`
+- `rpi_ws281x`
+- `adafruit-circuitpython-servokit`
+
+These are imported only in hardware mode, so simulation can run on any machine.
+
+## Project layout
+- `sentinel.py`: main entry point.
+- `src/`: supporting modules (legacy or experimental).
 
 ## Notes
-- Add hardware notes here (camera model, LEDs/servo, OS, etc.)
+- LBPH requires OpenCV contrib (`opencv-contrib-python`).
  

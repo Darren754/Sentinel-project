@@ -1,4 +1,8 @@
-# fill this with the packages you actually import in sentinel.py
-# examples:
-# opencv-python
-# numpy
+# Base dependencies used by dataset utilities and face recognition
+numpy>=1.24.0
+opencv-contrib-python>=4.8.0
+
+# Raspberry Pi hardware dependencies (install on-device, typically via apt/pip):
+# picamera2
+# rpi_ws281x
+# adafruit-circuitpython-servokit

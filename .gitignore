@@ -1,14 +1,24 @@
-# Python
 __pycache__/
-*.py[cod]
-*.log
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
 
-# Virtual env
 .venv/
 venv/
-env/
+.env
+.python-version
 
-# OS / IDE
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+build/
+dist/
+
 .DS_Store
-.idea/
+Thumbs.db
+
 .vscode/
+.idea/
