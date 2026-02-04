@@ -35,16 +35,22 @@ python sentinel.py --simulate --duration 60
 python sentinel.py --enable-face --model ./face_model.yml --labels ./face_labels.json
 ```
 
-### Dataset utilities
+### Dataset structure
+Store face images under `faces/<name>/<image>.jpg` (one folder per person). The capture tool writes this structure automatically.
+
+### Dataset utilities (capture, train, recognition)
 ```bash
-# Capture faces (Pi camera)
+# 1) Capture faces (Pi camera) into faces/<name>/<image>.jpg
 python sentinel.py capture-face --name Darren --count 25 --out ./faces
 
-# Scan for bad images (optional auto-move)
+# 2) (Optional) scan for bad images and auto-move them into faces/_bad/...
 python sentinel.py scan-faces --dataset ./faces --move-bad
 
-# Train LBPH model/labels
+# 3) Train LBPH model + labels from faces/<name>/*.jpg
 python sentinel.py train-lbph --dataset ./faces --model-out ./face_model.yml --labels-out ./face_labels.json
+
+# 4) Run recognition using the trained model
+python sentinel.py --enable-face --model ./face_model.yml --labels ./face_labels.json
 ```
 
 Backward-compatible capture flags:
@@ -66,4 +72,3 @@ These are imported only in hardware mode, so simulation can run on any machine.
 
 ## Notes
 - LBPH requires OpenCV contrib (`opencv-contrib-python`).
- 
