@@ -32,7 +32,7 @@ python sentinel.py --simulate --duration 60
 
 ### Face recognition (requires trained model)
 ```bash
-python sentinel.py --enable-face --model ./face_model.yml --labels ./face_labels.json
+python sentinel.py --enable-face --model ./models/lbph.yml --labels ./models/labels.json
 ```
 
 ### Dataset structure
@@ -42,20 +42,25 @@ Store face images under `faces/<name>/<image>.jpg` (one folder per person). The 
 ```bash
 # 1) Capture faces (Pi camera) into faces/<name>/<image>.jpg
 python sentinel.py capture-face --name Darren --count 25 --out ./faces
+# (Optional) Skip auto-training:
+# python sentinel.py capture-face --name Darren --count 25 --out ./faces --no-train
 
 # 2) (Optional) scan for bad images and auto-move them into faces/_bad/...
 python sentinel.py scan-faces --dataset ./faces --move-bad
 
-# 3) Train LBPH model + labels from faces/<name>/*.jpg
-python sentinel.py train-lbph --dataset ./faces --model-out ./face_model.yml --labels-out ./face_labels.json
+# 3) Auto-training runs immediately after capture (writes ./models/lbph.yml + ./models/labels.json).
+#    You can also train manually:
+python sentinel.py train-lbph --dataset ./faces --model-out ./models/lbph.yml --labels-out ./models/labels.json
 
 # 4) Run recognition using the trained model
-python sentinel.py --enable-face --model ./face_model.yml --labels ./face_labels.json
+python sentinel.py --enable-face --model ./models/lbph.yml --labels ./models/labels.json
 ```
 
 Backward-compatible capture flags:
 ```bash
 python sentinel.py --capture-face Darren --capture-count 25 --capture-out ./faces
+# (Optional) skip auto-training:
+# python sentinel.py --capture-face Darren --capture-count 25 --capture-out ./faces --no-train
 ```
 
 ## Raspberry Pi setup
