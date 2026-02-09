@@ -8,7 +8,7 @@ Default run (motion only):
   python3 sentinel.py
 
 Run with face recognition:
-  python3 sentinel.py --enable-face --model ./face_model.yml --labels ./face_labels.json
+  python3 sentinel.py --enable-face --model ./models/lbph.yml --labels ./models/labels.json
 
 Backward-compatible dataset capture (your command style):
   python3 sentinel.py --capture-face Darren --capture-count 25 --capture-out ./faces
@@ -16,7 +16,7 @@ Backward-compatible dataset capture (your command style):
 Recommended dataset utilities:
   python3 sentinel.py capture-face --name Darren --count 25 --out ./faces
   python3 sentinel.py scan-faces --dataset ./faces --move-bad
-  python3 sentinel.py train-lbph --dataset ./faces --model-out ./face_model.yml --labels-out ./face_labels.json
+  python3 sentinel.py train-lbph --dataset ./faces --model-out ./models/lbph.yml --labels-out ./models/labels.json
 
 Simulation (no Pi hardware libs):
   python3 sentinel.py --simulate --duration 60
@@ -169,6 +169,35 @@ def build_logger(level: str) -> logging.Logger:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     return logging.getLogger("sentinel")
+
+
+def auto_train_lbph(dataset_dir: Path, name: str, *, model_out: Path, labels_out: Path) -> None:
+    person_dir = dataset_dir.expanduser().resolve() / name
+    if not person_dir.exists():
+        raise SystemExit(f"Expected capture folder not found: {person_dir}")
+    images = [
+        p
+        for p in person_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}
+    ]
+    if not images:
+        raise SystemExit(f"No images found in {person_dir}. Capture may have failed.")
+
+    try:
+        train_lbph(dataset_dir, model_out, labels_out)
+    except (ImportError, RuntimeError) as exc:
+        print("Auto-training skipped.")
+        print(f"Reason: {exc}")
+        print("Tip: install opencv-contrib-python to enable cv2.face.LBPHFaceRecognizer_create.")
+        return
+
+    print("Auto-training complete.")
+    print(f"  model:  {model_out.expanduser().resolve()}")
+    print(f"  labels: {labels_out.expanduser().resolve()}")
+    print("Next: run recognition with:")
+    print(
+        f"  python sentinel.py --enable-face --model {model_out} --labels {labels_out}"
+    )
 
 
 # -----------------------
@@ -547,8 +576,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
 
     p.add_argument("--enable-face", action="store_true", help="Enable LBPH recognition during runtime.")
-    p.add_argument("--model", default="./face_model.yml", help="LBPH model file.")
-    p.add_argument("--labels", default="./face_labels.json", help="Labels json file.")
+    p.add_argument("--model", default="./models/lbph.yml", help="LBPH model file.")
+    p.add_argument("--labels", default="./models/labels.json", help="Labels json file.")
     p.add_argument("--face-threshold", type=float, default=CFG.face_threshold, help="LBPH distance threshold (lower=stiffer).")
     p.add_argument("--unknown-alert", action="store_true", help="Set ALERT state when face is unknown.")
 
@@ -558,6 +587,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cap.add_argument("--name", required=True)
     cap.add_argument("--count", type=int, default=25)
     cap.add_argument("--out", required=True)
+    cap.add_argument("--no-train", action="store_true", help="Skip auto-training after capture.")
 
     scan = sub.add_parser("scan-faces", help="Scan dataset and optionally move bad images")
     scan.add_argument("--dataset", required=True)
@@ -592,7 +622,10 @@ def dispatch_cli() -> None:
             j = raw.index("--capture-out")
             out = raw[j + 1]
 
+        no_train = "--no-train" in raw
         capture_face_dataset(name=name, count=count, out_dir=Path(out))
+        if not no_train:
+            auto_train_lbph(Path(out), name, model_out=Path("models/lbph.yml"), labels_out=Path("models/labels.json"))
         return
 
     parser = build_arg_parser()
@@ -600,6 +633,8 @@ def dispatch_cli() -> None:
 
     if args.cmd == "capture-face":
         capture_face_dataset(name=args.name, count=args.count, out_dir=Path(args.out))
+        if not args.no_train:
+            auto_train_lbph(Path(args.out), args.name, model_out=Path("models/lbph.yml"), labels_out=Path("models/labels.json"))
         return
 
     if args.cmd == "scan-faces":
