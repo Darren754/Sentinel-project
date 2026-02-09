@@ -11,6 +11,7 @@ Mobile robot project with motion tracking, LED "eye," servo scanning, and option
 ## Requirements
 - Python 3.9+ recommended
 - Optional Raspberry Pi hardware libraries (see Hardware setup)
+- Configuration uses YAML via PyYAML (included in `requirements.txt`).
 
 ## Setup
 ```bash
@@ -23,6 +24,31 @@ pip install -r requirements.txt
 ```bash
 python sentinel.py
 ```
+
+## Configuration
+Sentinel reads `config.yaml` from the same directory as `sentinel.py`. If the file is missing, the defaults below are used.
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+CLI flags always override config values when provided (e.g., `--model`, `--labels`, `--capture-count`).
+
+Config fields:
+- **Paths**
+  - `faces_dir` (default `faces`)
+  - `models_dir` (default `models`)
+  - `model_path` (default `models/lbph.yml`)
+  - `labels_path` (default `models/labels.json`)
+- **Hardware**
+  - `led_count`
+  - `led_pin` (default GPIO18)
+  - `led_brightness` (0-255)
+  - `pca9685_i2c_address` (default `0x40`)
+  - `servo_channel`
+  - `servo_left` / `servo_center` / `servo_right`
+- **Capture defaults**
+  - `capture_count_default` (default `25`)
 
 ## Usage
 ### Simulation (no Pi hardware)
