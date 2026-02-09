@@ -58,11 +58,36 @@ Backward-compatible capture flags:
 python sentinel.py --capture-face Darren --capture-count 25 --capture-out ./faces
 ```
 
-## Hardware setup (Raspberry Pi)
-Install hardware-specific packages on the Pi (often via apt/pip):
-- `picamera2`
-- `rpi_ws281x`
-- `adafruit-circuitpython-servokit`
+## Raspberry Pi setup
+### System packages (apt)
+```bash
+sudo apt update
+sudo apt install -y python3-picamera2 libcamera-apps i2c-tools
+```
+
+### Enable I2C
+```bash
+sudo raspi-config
+```
+Navigate to **Interface Options** → **I2C** and enable it, then reboot if prompted.
+
+### Python dependencies (pip)
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r requirements-pi.txt
+```
+
+### Hardware run command
+```bash
+sudo -E .venv/bin/python sentinel.py
+```
+
+### Hardware assumptions
+- WS2812 data on GPIO18 (Pin 12)
+- PCA9685 at I2C address `0x40`
+- Camera uses picamera2/libcamera
 
 These are imported only in hardware mode, so simulation can run on any machine.
 
