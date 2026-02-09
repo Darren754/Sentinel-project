@@ -26,7 +26,7 @@ Notes:
 - Picamera2 + rpi_ws281x + ServoKit are used only in hardware mode.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from pathlib import Path
 from typing import Optional, Protocol, Tuple
@@ -51,7 +51,13 @@ from src.face import (
 # CONFIG
 # -----------------------
 @dataclass(frozen=True)
-class Config:
+class Settings:
+    # Paths
+    faces_dir: str = "faces"
+    models_dir: str = "models"
+    model_path: str = "models/lbph.yml"
+    labels_path: str = "models/labels.json"
+
     # LEDs
     led_count: int = 8
     led_pin: int = 18
@@ -59,12 +65,13 @@ class Config:
     eye_rgb: Tuple[int, int, int] = (255, 20, 10)
 
     # Servo (PCA9685)
-    servo_ch: int = 0
+    pca9685_i2c_address: int = 0x40
+    servo_channel: int = 0
     servo_min: int = 20
     servo_max: int = 160
-    servo_neutral: int = 90
     servo_left: int = 130
     servo_right: int = 50
+    servo_center: int = 90
 
     move_step_deg: int = 2
     servo_tick_sec: float = 0.03
@@ -83,8 +90,62 @@ class Config:
     face_check_interval_sec: float = 0.8
     face_threshold: float = 65.0  # lower is stricter
 
+    # Capture defaults
+    capture_count_default: int = 25
 
-CFG = Config()
+
+CFG = Settings()
+
+
+def _load_yaml_config(config_path: Path) -> dict:
+    import yaml
+
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+
+    data = yaml.safe_load(raw) or {}
+    if not isinstance(data, dict):
+        raise SystemExit(f"Config file must be a mapping: {config_path}")
+    return data
+
+
+def load_settings(config_path: Path) -> Tuple[Settings, bool]:
+    if not config_path.exists():
+        return CFG, False
+
+    data = _load_yaml_config(config_path)
+
+    paths = data.get("paths", {}) if isinstance(data.get("paths", {}), dict) else {}
+    hardware = data.get("hardware", {}) if isinstance(data.get("hardware", {}), dict) else {}
+    capture = data.get("capture", {}) if isinstance(data.get("capture", {}), dict) else {}
+
+    models_dir = paths.get("models_dir", CFG.models_dir)
+    model_path = paths.get("model_path")
+    labels_path = paths.get("labels_path")
+    if model_path is None and "models_dir" in paths:
+        model_path = str(Path(models_dir) / "lbph.yml")
+    if labels_path is None and "models_dir" in paths:
+        labels_path = str(Path(models_dir) / "labels.json")
+
+    settings = replace(
+        CFG,
+        faces_dir=paths.get("faces_dir", CFG.faces_dir),
+        models_dir=models_dir,
+        model_path=model_path or CFG.model_path,
+        labels_path=labels_path or CFG.labels_path,
+        led_count=hardware.get("led_count", CFG.led_count),
+        led_pin=hardware.get("led_pin", CFG.led_pin),
+        led_brightness=hardware.get("led_brightness", CFG.led_brightness),
+        pca9685_i2c_address=hardware.get("pca9685_i2c_address", CFG.pca9685_i2c_address),
+        servo_channel=hardware.get("servo_channel", CFG.servo_channel),
+        servo_left=hardware.get("servo_left", CFG.servo_left),
+        servo_center=hardware.get("servo_center", CFG.servo_center),
+        servo_right=hardware.get("servo_right", CFG.servo_right),
+        capture_count_default=capture.get("capture_count_default", CFG.capture_count_default),
+    )
+    return settings, True
 
 
 # -----------------------
@@ -102,7 +163,7 @@ class State(Enum):
 class Shared:
     state: State = State.IDLE
     last_motion_time: float = 0.0
-    desired_observe_angle: int = CFG.servo_neutral
+    desired_observe_angle: int = field(default_factory=lambda: CFG.servo_center)
 
     pending_ack: bool = False
     last_seen_name: str = ""
@@ -258,7 +319,7 @@ def _step_towards(current: int, target: int, step: int) -> int:
 
 
 async def servo_task(shared: Shared, servo: ServoDriver) -> None:
-    current = int(clamp(CFG.servo_neutral, CFG.servo_min, CFG.servo_max))
+    current = int(clamp(CFG.servo_center, CFG.servo_min, CFG.servo_max))
     servo.set_angle(current)
 
     while True:
@@ -282,7 +343,7 @@ async def servo_task(shared: Shared, servo: ServoDriver) -> None:
                 await set_state(shared, State.IDLE)
 
         elif s == State.IDLE:
-            target = int(clamp(CFG.servo_neutral, CFG.servo_min, CFG.servo_max))
+            target = int(clamp(CFG.servo_center, CFG.servo_min, CFG.servo_max))
             nxt = _step_towards(current, target, CFG.move_step_deg)
             if nxt != current:
                 servo.set_angle(nxt)
@@ -415,11 +476,11 @@ class Pca9685Servo:
     def __init__(self) -> None:
         from adafruit_servokit import ServoKit  # type: ignore
 
-        self._kit = ServoKit(channels=16)
+        self._kit = ServoKit(channels=16, address=CFG.pca9685_i2c_address)
 
     def set_angle(self, angle: int) -> None:
         angle = int(clamp(angle, CFG.servo_min, CFG.servo_max))
-        self._kit.servo[CFG.servo_ch].angle = angle
+        self._kit.servo[CFG.servo_channel].angle = angle
 
     def close(self) -> None:
         return
@@ -551,7 +612,7 @@ async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face
             pass
 
         try:
-            servo.set_angle(CFG.servo_neutral)
+            servo.set_angle(CFG.servo_center)
         except Exception:
             pass
 
@@ -569,23 +630,23 @@ async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face
 # -----------------------
 # CLI
 # -----------------------
-def build_arg_parser() -> argparse.ArgumentParser:
+def build_arg_parser(settings: Settings) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Sentinel Droid controller")
     p.add_argument("--simulate", action="store_true", help="Run without Pi hardware libs.")
     p.add_argument("--duration", type=float, default=None, help="Run for N seconds then exit.")
     p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
 
     p.add_argument("--enable-face", action="store_true", help="Enable LBPH recognition during runtime.")
-    p.add_argument("--model", default="./models/lbph.yml", help="LBPH model file.")
-    p.add_argument("--labels", default="./models/labels.json", help="Labels json file.")
-    p.add_argument("--face-threshold", type=float, default=CFG.face_threshold, help="LBPH distance threshold (lower=stiffer).")
+    p.add_argument("--model", default=settings.model_path, help="LBPH model file.")
+    p.add_argument("--labels", default=settings.labels_path, help="Labels json file.")
+    p.add_argument("--face-threshold", type=float, default=settings.face_threshold, help="LBPH distance threshold (lower=stiffer).")
     p.add_argument("--unknown-alert", action="store_true", help="Set ALERT state when face is unknown.")
 
     sub = p.add_subparsers(dest="cmd", required=False)
 
     cap = sub.add_parser("capture-face", help="Capture face dataset for one person (Pi camera)")
     cap.add_argument("--name", required=True)
-    cap.add_argument("--count", type=int, default=25)
+    cap.add_argument("--count", type=int, default=settings.capture_count_default)
     cap.add_argument("--out", required=True)
     cap.add_argument("--no-train", action="store_true", help="Skip auto-training after capture.")
 
@@ -604,6 +665,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def dispatch_cli() -> None:
     import sys
 
+    config_path = Path(__file__).resolve().parent / "config.yaml"
+    settings, loaded = load_settings(config_path)
+    global CFG
+    CFG = settings
+    if loaded:
+        print(f"Config: loaded {config_path}")
+    else:
+        print(f"Config: not found ({config_path}), using defaults")
+
     raw = sys.argv[1:]
 
     # Backwards-compatible flags (your command style)
@@ -613,8 +683,8 @@ def dispatch_cli() -> None:
         if not name:
             raise SystemExit("Missing value for --capture-face NAME")
 
-        count = 25
-        out = "./faces"
+        count = CFG.capture_count_default
+        out = CFG.faces_dir
         if "--capture-count" in raw:
             j = raw.index("--capture-count")
             count = int(raw[j + 1])
@@ -625,16 +695,26 @@ def dispatch_cli() -> None:
         no_train = "--no-train" in raw
         capture_face_dataset(name=name, count=count, out_dir=Path(out))
         if not no_train:
-            auto_train_lbph(Path(out), name, model_out=Path("models/lbph.yml"), labels_out=Path("models/labels.json"))
+            auto_train_lbph(
+                Path(out),
+                name,
+                model_out=Path(CFG.model_path),
+                labels_out=Path(CFG.labels_path),
+            )
         return
 
-    parser = build_arg_parser()
+    parser = build_arg_parser(CFG)
     args = parser.parse_args()
 
     if args.cmd == "capture-face":
         capture_face_dataset(name=args.name, count=args.count, out_dir=Path(args.out))
         if not args.no_train:
-            auto_train_lbph(Path(args.out), args.name, model_out=Path("models/lbph.yml"), labels_out=Path("models/labels.json"))
+            auto_train_lbph(
+                Path(args.out),
+                args.name,
+                model_out=Path(CFG.model_path),
+                labels_out=Path(CFG.labels_path),
+            )
         return
 
     if args.cmd == "scan-faces":

@@ -1,0 +1,32 @@
+# Copy this file to config.yaml (in the same directory as sentinel.py)
+# and tweak values as needed.
+
+paths:
+  # Directory for captured face datasets.
+  faces_dir: "faces"
+  # Directory for model/label artifacts.
+  models_dir: "models"
+  # LBPH model file path.
+  model_path: "models/lbph.yml"
+  # Labels JSON path.
+  labels_path: "models/labels.json"
+
+hardware:
+  # Number of LEDs in the ring.
+  led_count: 8
+  # GPIO pin for WS2812 data (GPIO18).
+  led_pin: 18
+  # LED brightness (0-255).
+  led_brightness: 35
+  # PCA9685 I2C address.
+  pca9685_i2c_address: 0x40
+  # Servo channel on the PCA9685.
+  servo_channel: 0
+  # Servo angles (degrees).
+  servo_left: 130
+  servo_center: 90
+  servo_right: 50
+
+capture:
+  # Default number of images to capture.
+  capture_count_default: 25
