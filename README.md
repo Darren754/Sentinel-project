@@ -22,8 +22,11 @@ pip install -r requirements.txt
 
 ## Run
 ```bash
-python sentinel.py
+python sentinel.py --run continuous
 ```
+
+`--run continuous` is the default runtime mode and keeps Sentinel in the idle/observe/recognize loop until stopped.
+Press `Ctrl+C` for a graceful shutdown (LEDs off, servo centered, camera closed).
 
 ## Configuration
 Sentinel reads `config.yaml` from the same directory as `sentinel.py`. If the file is missing, the defaults below are used.
@@ -60,6 +63,8 @@ python sentinel.py --simulate --duration 60
 ```bash
 python sentinel.py --enable-face --model ./models/lbph.yml --labels ./models/labels.json
 ```
+
+If model files are missing/unreadable, Sentinel now continues running and treats recognitions as `Unknown` instead of crashing.
 
 ### Dataset structure
 Store face images under `faces/<name>/<image>.jpg` (one folder per person). The capture tool writes this structure automatically.

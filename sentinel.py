@@ -36,7 +36,7 @@ import asyncio
 import logging
 import random
 import math
-import os
+import signal
 import time
 
 from src.face import (
@@ -572,14 +572,24 @@ def build_system(simulate: bool) -> Tuple[LedRing, ServoDriver, MotionSensor, bo
     return Ws281xRing(), Pca9685Servo(), PiCameraMotionSensor(), False
 
 
+class UnknownFaceAuth:
+    """Fallback recognizer that always reports unknown."""
+
+    def recognize(self, frame_rgb) -> Tuple[Optional[str], float]:
+        return None, 999.0
+
+
 # -----------------------
 # MAIN RUNNER
 # -----------------------
-async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face: bool,
+async def run_sentinel(*, simulate: bool, duration: Optional[float], run_mode: str, enable_face: bool,
                        model: Path, labels: Path, face_threshold: float, unknown_alert: bool,
                        log_level: str) -> None:
     log = build_logger(log_level)
     shared = Shared()
+
+    if run_mode != "continuous":
+        raise ValueError(f"Unsupported run mode: {run_mode}")
 
     ring, servo, sensor, sim_active = build_system(simulate)
     if sim_active:
@@ -587,8 +597,12 @@ async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face
 
     face = None
     if enable_face and not sim_active:
-        face = FaceAuth(model, labels, threshold=face_threshold)
-        log.info("Face recognition enabled threshold=%.1f", face_threshold)
+        try:
+            face = FaceAuth(model, labels, threshold=face_threshold)
+            log.info("Face recognition enabled threshold=%.1f", face_threshold)
+        except (FileNotFoundError, RuntimeError, OSError, ValueError, ImportError) as exc:
+            face = UnknownFaceAuth()
+            log.warning("Face recognition unavailable (%s). Falling back to Unknown.", exc)
 
     tasks = [
         asyncio.create_task(led_task(shared, ring), name="led_task"),
@@ -596,11 +610,28 @@ async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face
         asyncio.create_task(camera_task(shared, sensor, face, unknown_alert=unknown_alert, log=log), name="camera_task"),
     ]
 
+    stop_event = asyncio.Event()
+
+    def _request_shutdown() -> None:
+        if not stop_event.is_set():
+            log.info("Shutdown requested. Stopping Sentinel...")
+            stop_event.set()
+
+    if duration is None:
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, _request_shutdown)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+
     try:
         if duration is None:
-            await asyncio.gather(*tasks)
+            await stop_event.wait()
         else:
             await asyncio.sleep(duration)
+    except KeyboardInterrupt:
+        _request_shutdown()
     finally:
         for t in tasks:
             t.cancel()
@@ -633,6 +664,7 @@ async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face
 def build_arg_parser(settings: Settings) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Sentinel Droid controller")
     p.add_argument("--simulate", action="store_true", help="Run without Pi hardware libs.")
+    p.add_argument("--run", choices=["continuous"], default="continuous", help="Runtime mode.")
     p.add_argument("--duration", type=float, default=None, help="Run for N seconds then exit.")
     p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
 
@@ -729,6 +761,7 @@ def dispatch_cli() -> None:
         run_sentinel(
             simulate=bool(args.simulate),
             duration=args.duration,
+            run_mode=str(args.run),
             enable_face=bool(args.enable_face),
             model=Path(args.model).expanduser(),
             labels=Path(args.labels).expanduser(),
