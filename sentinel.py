@@ -21,6 +21,9 @@ Recommended dataset utilities:
 Simulation (no Pi hardware libs):
   python3 sentinel.py --simulate --duration 60
 
+Continuous run mode (idle/observe/recognize):
+  python3 sentinel.py --run --run-duration 60
+
 Notes:
 - LBPH requires OpenCV "contrib" (cv2.face.LBPHFaceRecognizer_create).
 - Picamera2 + rpi_ws281x + ServoKit are used only in hardware mode.
@@ -155,6 +158,7 @@ class State(Enum):
     IDLE = auto()
     PROCESS = auto()
     OBSERVE = auto()
+    RECOGNIZE = auto()
     ACK = auto()
     ALERT = auto()
 
@@ -215,6 +219,15 @@ async def set_state(shared: Shared, new_state: State) -> None:
 async def get_state(shared: Shared) -> State:
     async with shared.state_lock:
         return shared.state
+
+
+async def transition_state(shared: Shared, new_state: State, *, log: logging.Logger) -> State:
+    async with shared.state_lock:
+        old = shared.state
+        if old != new_state:
+            shared.state = new_state
+            log.info("STATE transition=%s->%s", old.name, new_state.name)
+        return old
 
 
 def angle_from_x_norm(x_norm: float) -> int:
@@ -290,6 +303,9 @@ async def led_task(shared: Shared, ring: LedRing) -> None:
         elif s == State.OBSERVE:
             ring.set_all(rgb_scaled(CFG.eye_rgb, 0.22))
 
+        elif s == State.RECOGNIZE:
+            ring.set_all(rgb_scaled(CFG.eye_rgb, 0.26))
+
         elif s == State.ALERT:
             period = 3.5
             x = (math.sin(2 * math.pi * (t / period)) + 1) / 2
@@ -325,7 +341,7 @@ async def servo_task(shared: Shared, servo: ServoDriver) -> None:
     while True:
         s = await get_state(shared)
 
-        if s in (State.OBSERVE, State.ALERT):
+        if s in (State.OBSERVE, State.RECOGNIZE, State.ALERT):
             # Always track latest desired angle.
             target = int(clamp(shared.desired_observe_angle, CFG.servo_min, CFG.servo_max))
             nxt = _step_towards(current, target, CFG.move_step_deg)
@@ -401,6 +417,59 @@ async def camera_task(
                         log.info("FACE unknown dist=%.2f", dist)
                         if unknown_alert:
                             await set_state(shared, State.ALERT)
+
+        await asyncio.sleep(CFG.camera_tick_sec)
+
+
+# -----------------------
+# CONTINUOUS RUN CAMERA TASK (idle/observe/recognize)
+# -----------------------
+async def run_camera_task(
+    shared: Shared,
+    sensor: MotionSensor,
+    face: Optional[FaceAuth],
+    detector: Optional[FaceDetector],
+    *,
+    log: logging.Logger,
+) -> None:
+    last_face_check = 0.0
+
+    while True:
+        triggered, _direction, strength, x_norm = sensor.check_motion_direction()
+        now = time.time()
+
+        if strength > CFG.motion_threshold:
+            shared.last_motion_time = now
+
+        if triggered:
+            shared.desired_observe_angle = angle_from_x_norm(x_norm)
+            if await get_state(shared) == State.IDLE:
+                await transition_state(shared, State.OBSERVE, log=log)
+
+        if (now - shared.last_motion_time) > CFG.return_to_idle_sec:
+            await transition_state(shared, State.IDLE, log=log)
+
+        if strength > CFG.motion_threshold and (now - last_face_check) >= CFG.face_check_interval_sec:
+            last_face_check = now
+            frame = sensor.get_last_frame_rgb()
+            if frame is not None:
+                name = None
+                dist = 999.0
+                if face:
+                    name, dist = face.recognize(frame)
+                    face_found = name is not None or dist < 999.0
+                elif detector:
+                    face_found = detector.has_face(frame)
+                else:
+                    face_found = False
+
+                if face_found:
+                    await transition_state(shared, State.RECOGNIZE, log=log)
+                    if name:
+                        log.info("FACE recognized=%s dist=%.2f", name, dist)
+                    else:
+                        log.info("FACE recognized=Unknown dist=%.2f", dist)
+                    await transition_state(shared, State.OBSERVE, log=log)
 
         await asyncio.sleep(CFG.camera_tick_sec)
 
@@ -572,12 +641,54 @@ def build_system(simulate: bool) -> Tuple[LedRing, ServoDriver, MotionSensor, bo
     return Ws281xRing(), Pca9685Servo(), PiCameraMotionSensor(), False
 
 
+def init_face_auth(
+    model: Path,
+    labels: Path,
+    *,
+    threshold: float,
+    log: logging.Logger,
+    allow_missing: bool,
+) -> Optional[FaceAuth]:
+    try:
+        return FaceAuth(model, labels, threshold=threshold)
+    except (FileNotFoundError, RuntimeError) as exc:
+        if allow_missing:
+            log.warning("Face recognition unavailable: %s", exc)
+            return None
+        raise
+
+
+class FaceDetector:
+    def __init__(self) -> None:
+        import cv2  # type: ignore
+
+        cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+        if not cascade_path.exists():
+            raise FileNotFoundError(f"Missing Haar cascade: {cascade_path}")
+        self._cv2 = cv2
+        self._cascade = cv2.CascadeClassifier(str(cascade_path))
+
+    def has_face(self, frame_rgb) -> bool:
+        cv2 = self._cv2
+        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+        faces = self._cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(80, 80))
+        return len(faces) > 0
+
+
+def init_face_detector(log: logging.Logger) -> Optional[FaceDetector]:
+    try:
+        return FaceDetector()
+    except (ImportError, FileNotFoundError) as exc:
+        log.warning("Face detection unavailable: %s", exc)
+        return None
+
+
 # -----------------------
 # MAIN RUNNER
 # -----------------------
 async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face: bool,
                        model: Path, labels: Path, face_threshold: float, unknown_alert: bool,
-                       log_level: str) -> None:
+                       log_level: str, run_mode: bool, run_duration: Optional[float]) -> None:
     log = build_logger(log_level)
     shared = Shared()
 
@@ -586,15 +697,42 @@ async def run_sentinel(*, simulate: bool, duration: Optional[float], enable_face
         log.info("Simulation mode active.")
 
     face = None
-    if enable_face and not sim_active:
-        face = FaceAuth(model, labels, threshold=face_threshold)
+    detector = None
+    if run_mode and not sim_active:
+        face = init_face_auth(
+            model,
+            labels,
+            threshold=face_threshold,
+            log=log,
+            allow_missing=True,
+        )
+        if face is None:
+            detector = init_face_detector(log)
+        log.info("Continuous run mode active. threshold=%.1f", face_threshold)
+    elif enable_face and not sim_active:
+        face = init_face_auth(
+            model,
+            labels,
+            threshold=face_threshold,
+            log=log,
+            allow_missing=False,
+        )
         log.info("Face recognition enabled threshold=%.1f", face_threshold)
 
-    tasks = [
-        asyncio.create_task(led_task(shared, ring), name="led_task"),
-        asyncio.create_task(servo_task(shared, servo), name="servo_task"),
-        asyncio.create_task(camera_task(shared, sensor, face, unknown_alert=unknown_alert, log=log), name="camera_task"),
-    ]
+    if run_mode:
+        tasks = [
+            asyncio.create_task(led_task(shared, ring), name="led_task"),
+            asyncio.create_task(servo_task(shared, servo), name="servo_task"),
+            asyncio.create_task(run_camera_task(shared, sensor, face, detector, log=log), name="run_camera_task"),
+        ]
+        await transition_state(shared, State.IDLE, log=log)
+        duration = run_duration if run_duration is not None else duration
+    else:
+        tasks = [
+            asyncio.create_task(led_task(shared, ring), name="led_task"),
+            asyncio.create_task(servo_task(shared, servo), name="servo_task"),
+            asyncio.create_task(camera_task(shared, sensor, face, unknown_alert=unknown_alert, log=log), name="camera_task"),
+        ]
 
     try:
         if duration is None:
@@ -634,6 +772,8 @@ def build_arg_parser(settings: Settings) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Sentinel Droid controller")
     p.add_argument("--simulate", action="store_true", help="Run without Pi hardware libs.")
     p.add_argument("--duration", type=float, default=None, help="Run for N seconds then exit.")
+    p.add_argument("--run", action="store_true", help="Run continuous idle/observe/recognize mode.")
+    p.add_argument("--run-duration", type=float, default=None, help="Continuous run mode duration (seconds).")
     p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
 
     p.add_argument("--enable-face", action="store_true", help="Enable LBPH recognition during runtime.")
@@ -735,6 +875,8 @@ def dispatch_cli() -> None:
             face_threshold=float(args.face_threshold),
             unknown_alert=bool(args.unknown_alert),
             log_level=str(args.log_level),
+            run_mode=bool(args.run),
+            run_duration=args.run_duration,
         )
     )
 
