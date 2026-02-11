@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # /home/pi/droid/sentinel.py
+from __future__ import annotations
+
 """
 Sentinel Droid controller: motion tracking + LED eye + servo + optional LBPH face recognition
 plus dataset utilities (capture / scan+move-bad / train).
