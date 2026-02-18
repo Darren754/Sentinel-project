@@ -74,6 +74,8 @@ class Settings:
     servo_left: int = 130
     servo_right: int = 50
     servo_center: int = 90
+    ramp_step_deg: int = 2
+    ramp_step_ms: int = 20
 
     move_step_deg: int = 2
     servo_tick_sec: float = 0.03
@@ -121,6 +123,7 @@ def load_settings(config_path: Path) -> Tuple[Settings, bool]:
 
     paths = data.get("paths", {}) if isinstance(data.get("paths", {}), dict) else {}
     hardware = data.get("hardware", {}) if isinstance(data.get("hardware", {}), dict) else {}
+    servo = data.get("servo", {}) if isinstance(data.get("servo", {}), dict) else {}
     capture = data.get("capture", {}) if isinstance(data.get("capture", {}), dict) else {}
 
     models_dir = paths.get("models_dir", CFG.models_dir)
@@ -145,6 +148,8 @@ def load_settings(config_path: Path) -> Tuple[Settings, bool]:
         servo_left=hardware.get("servo_left", CFG.servo_left),
         servo_center=hardware.get("servo_center", CFG.servo_center),
         servo_right=hardware.get("servo_right", CFG.servo_right),
+        ramp_step_deg=servo.get("ramp_step_deg", CFG.ramp_step_deg),
+        ramp_step_ms=servo.get("ramp_step_ms", CFG.ramp_step_ms),
         capture_count_default=capture.get("capture_count_default", CFG.capture_count_default),
     )
     return settings, True
@@ -185,6 +190,7 @@ class LedRing(Protocol):
 
 class ServoDriver(Protocol):
     def set_angle(self, angle: int) -> None: ...
+    async def move_to(self, pan_target: int, tilt_target: int) -> None: ...
     def close(self) -> None: ...
 
 
@@ -421,8 +427,17 @@ class SimLedRing:
 
 
 class SimServo:
+    def __init__(self) -> None:
+        self._current_pan_angle = CFG.servo_center
+        self._current_tilt_angle = CFG.servo_center
+
     def set_angle(self, angle: int) -> None:
-        return
+        self._current_pan_angle = int(clamp(angle, CFG.servo_min, CFG.servo_max))
+
+    async def move_to(self, pan_target: int, tilt_target: int) -> None:
+        self._current_pan_angle = int(clamp(pan_target, CFG.servo_min, CFG.servo_max))
+        self._current_tilt_angle = int(clamp(tilt_target, CFG.servo_min, CFG.servo_max))
+        await asyncio.sleep(0)
 
     def close(self) -> None:
         return
@@ -479,10 +494,44 @@ class Pca9685Servo:
         from adafruit_servokit import ServoKit  # type: ignore
 
         self._kit = ServoKit(channels=16, address=CFG.pca9685_i2c_address)
+        self._pan_channel = CFG.servo_channel
+        self._tilt_channel = min(15, CFG.servo_channel + 1)
+        self._current_pan_angle = int(clamp(CFG.servo_center, CFG.servo_min, CFG.servo_max))
+        self._current_tilt_angle = int(clamp(CFG.servo_center, CFG.servo_min, CFG.servo_max))
+        self._set_pan_angle(self._current_pan_angle)
+        self._set_tilt_angle(self._current_tilt_angle)
+
+    def _set_pan_angle(self, angle: int) -> None:
+        self._kit.servo[self._pan_channel].angle = angle
+
+    def _set_tilt_angle(self, angle: int) -> None:
+        self._kit.servo[self._tilt_channel].angle = angle
 
     def set_angle(self, angle: int) -> None:
         angle = int(clamp(angle, CFG.servo_min, CFG.servo_max))
-        self._kit.servo[CFG.servo_channel].angle = angle
+        self._set_pan_angle(angle)
+        self._current_pan_angle = angle
+
+    async def move_to(self, pan_target: int, tilt_target: int) -> None:
+        pan_target = int(clamp(pan_target, CFG.servo_min, CFG.servo_max))
+        tilt_target = int(clamp(tilt_target, CFG.servo_min, CFG.servo_max))
+        step = max(1, int(CFG.ramp_step_deg))
+        pause_sec = max(0, int(CFG.ramp_step_ms)) / 1000.0
+
+        while self._current_pan_angle != pan_target or self._current_tilt_angle != tilt_target:
+            next_pan = _step_towards(self._current_pan_angle, pan_target, step)
+            next_tilt = _step_towards(self._current_tilt_angle, tilt_target, step)
+
+            if next_pan != self._current_pan_angle:
+                self._set_pan_angle(next_pan)
+                self._current_pan_angle = next_pan
+
+            if next_tilt != self._current_tilt_angle:
+                self._set_tilt_angle(next_tilt)
+                self._current_tilt_angle = next_tilt
+
+            if self._current_pan_angle != pan_target or self._current_tilt_angle != tilt_target:
+                await asyncio.sleep(pause_sec)
 
     def close(self) -> None:
         return
@@ -566,6 +615,12 @@ class PiCameraMotionSensor:
             self.picam2.stop()
         except Exception:
             pass
+
+
+def build_servo(simulate: bool) -> ServoDriver:
+    if simulate:
+        return SimServo()
+    return Pca9685Servo()
 
 
 def build_system(simulate: bool) -> Tuple[LedRing, ServoDriver, MotionSensor, bool]:
@@ -693,6 +748,10 @@ def build_arg_parser(settings: Settings) -> argparse.ArgumentParser:
     tr.add_argument("--model-out", required=True)
     tr.add_argument("--labels-out", required=True)
 
+    servo_test = sub.add_parser("servo-test", help="Ramped pan/tilt servo movement test")
+    servo_test.add_argument("axis", choices=["pan", "tilt"])
+    servo_test.add_argument("direction", choices=["left", "right", "up", "down", "center"])
+
     return p
 
 
@@ -757,6 +816,39 @@ def dispatch_cli() -> None:
 
     if args.cmd == "train-lbph":
         train_lbph(Path(args.dataset), Path(args.model_out), Path(args.labels_out))
+        return
+
+    if args.cmd == "servo-test":
+        servo = build_servo(simulate=bool(args.simulate))
+        pan_target = CFG.servo_center
+        tilt_target = CFG.servo_center
+
+        if args.axis == "pan":
+            if args.direction == "left":
+                pan_target = CFG.servo_left
+            elif args.direction == "right":
+                pan_target = CFG.servo_right
+            elif args.direction == "center":
+                pan_target = CFG.servo_center
+            else:
+                raise SystemExit("pan direction must be one of: left, right, center")
+        else:
+            if args.direction == "up":
+                tilt_target = CFG.servo_left
+            elif args.direction == "down":
+                tilt_target = CFG.servo_right
+            elif args.direction == "center":
+                tilt_target = CFG.servo_center
+            else:
+                raise SystemExit("tilt direction must be one of: up, down, center")
+
+        async def _run_servo_test() -> None:
+            try:
+                await servo.move_to(pan_target, tilt_target)
+            finally:
+                servo.close()
+
+        asyncio.run(_run_servo_test())
         return
 
     asyncio.run(
