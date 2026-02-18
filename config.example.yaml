@@ -30,3 +30,9 @@ hardware:
 capture:
   # Default number of images to capture.
   capture_count_default: 25
+
+servo:
+  # Ramping increment in degrees per step.
+  ramp_step_deg: 2
+  # Delay between ramp steps in milliseconds.
+  ramp_step_ms: 20
