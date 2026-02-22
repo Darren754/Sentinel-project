@@ -191,6 +191,7 @@ class ServoDriver(Protocol):
 class MotionSensor(Protocol):
     def check_motion_direction(self) -> Tuple[bool, str, int, float]: ...
     def get_last_frame_rgb(self): ...
+    def start_preview(self, mode: str, log: logging.Logger) -> None: ...
     def close(self) -> None: ...
 
 
@@ -443,6 +444,9 @@ class SimSensor:
     def get_last_frame_rgb(self):
         return None
 
+    def start_preview(self, mode: str, log: logging.Logger) -> None:
+        log.info("Preview '%s' requested in simulation mode; ignoring.", mode)
+
     def close(self) -> None:
         return
 
@@ -500,10 +504,33 @@ class PiCameraMotionSensor:
         self._last_frame = None
         self._last_trigger = 0.0
         self._prev_gray = None
+        self._preview_running = False
 
         self.picam2 = Picamera2()
         self.picam2.configure(self.picam2.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"}))
         self.picam2.start()
+
+    def start_preview(self, mode: str, log: logging.Logger) -> None:
+        if mode in {"off", "none"}:
+            return
+        if mode != "qtgl":
+            log.warning("Unsupported preview mode '%s'; continuing without preview.", mode)
+            return
+
+        import os
+
+        if not os.environ.get("DISPLAY"):
+            log.warning("Preview requested (--preview qtgl) but DISPLAY is not set. Continuing without preview.")
+            return
+
+        try:
+            from picamera2 import Preview  # type: ignore
+
+            self.picam2.start_preview(Preview.QTGL)
+            self._preview_running = True
+            log.info("Picamera2 preview started with QTGL.")
+        except Exception as exc:
+            log.warning("Failed to start QTGL preview (%s). Continuing without preview.", exc)
 
     def get_last_frame_rgb(self):
         return self._last_frame
@@ -563,6 +590,13 @@ class PiCameraMotionSensor:
 
     def close(self) -> None:
         try:
+            if self._preview_running:
+                self.picam2.stop_preview()
+                self._preview_running = False
+        except Exception:
+            pass
+
+        try:
             self.picam2.stop()
         except Exception:
             pass
@@ -586,7 +620,7 @@ class UnknownFaceAuth:
 # -----------------------
 async def run_sentinel(*, simulate: bool, duration: Optional[float], run_mode: str, enable_face: bool,
                        model: Path, labels: Path, face_threshold: float, unknown_alert: bool,
-                       log_level: str) -> None:
+                       log_level: str, preview: str) -> None:
     log = build_logger(log_level)
     shared = Shared()
 
@@ -596,6 +630,8 @@ async def run_sentinel(*, simulate: bool, duration: Optional[float], run_mode: s
     ring, servo, sensor, sim_active = build_system(simulate)
     if sim_active:
         log.info("Simulation mode active.")
+
+    sensor.start_preview(preview, log)
 
     face = None
     if enable_face and not sim_active:
@@ -669,6 +705,7 @@ def build_arg_parser(settings: Settings) -> argparse.ArgumentParser:
     p.add_argument("--run", choices=["continuous"], default="continuous", help="Runtime mode.")
     p.add_argument("--duration", type=float, default=None, help="Run for N seconds then exit.")
     p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
+    p.add_argument("--preview", choices=["off", "none", "qtgl"], default="off", help="Picamera2 preview mode (default: off).")
 
     p.add_argument("--enable-face", action="store_true", help="Enable LBPH recognition during runtime.")
     p.add_argument("--model", default=settings.model_path, help="LBPH model file.")
@@ -770,6 +807,7 @@ def dispatch_cli() -> None:
             face_threshold=float(args.face_threshold),
             unknown_alert=bool(args.unknown_alert),
             log_level=str(args.log_level),
+            preview=str(args.preview),
         )
     )
 
