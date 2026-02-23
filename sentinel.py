@@ -31,7 +31,7 @@ Notes:
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from pathlib import Path
-from typing import Optional, Protocol, Tuple
+from typing import Any, Optional, Protocol, Tuple
 
 import argparse
 import asyncio
@@ -489,7 +489,7 @@ class Pca9685Servo:
 
 
 class PiCameraMotionSensor:
-    def __init__(self) -> None:
+    def __init__(self, picam2=None) -> None:
         import cv2  # type: ignore
         import numpy as np  # type: ignore
         from picamera2 import Picamera2  # type: ignore
@@ -501,9 +501,12 @@ class PiCameraMotionSensor:
         self._last_trigger = 0.0
         self._prev_gray = None
 
-        self.picam2 = Picamera2()
-        self.picam2.configure(self.picam2.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"}))
-        self.picam2.start()
+        if picam2 is None:
+            self.picam2 = Picamera2()
+            self.picam2.configure(self.picam2.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"}))
+            self.picam2.start()
+        else:
+            self.picam2 = picam2
 
     def get_last_frame_rgb(self):
         return self._last_frame
@@ -563,15 +566,19 @@ class PiCameraMotionSensor:
 
     def close(self) -> None:
         try:
+            self.picam2.stop_preview()
+        except Exception:
+            pass
+        try:
             self.picam2.stop()
         except Exception:
             pass
 
 
-def build_system(simulate: bool) -> Tuple[LedRing, ServoDriver, MotionSensor, bool]:
+def build_system(simulate: bool, picam2=None) -> Tuple[LedRing, ServoDriver, MotionSensor, bool]:
     if simulate:
         return SimLedRing(), SimServo(), SimSensor(), True
-    return Ws281xRing(), Pca9685Servo(), PiCameraMotionSensor(), False
+    return Ws281xRing(), Pca9685Servo(), PiCameraMotionSensor(picam2=picam2), False
 
 
 class UnknownFaceAuth:
@@ -586,14 +593,14 @@ class UnknownFaceAuth:
 # -----------------------
 async def run_sentinel(*, simulate: bool, duration: Optional[float], run_mode: str, enable_face: bool,
                        model: Path, labels: Path, face_threshold: float, unknown_alert: bool,
-                       log_level: str) -> None:
+                       log_level: str, picam2=None) -> None:
     log = build_logger(log_level)
     shared = Shared()
 
     if run_mode != "continuous":
         raise ValueError(f"Unsupported run mode: {run_mode}")
 
-    ring, servo, sensor, sim_active = build_system(simulate)
+    ring, servo, sensor, sim_active = build_system(simulate, picam2=picam2)
     if sim_active:
         log.info("Simulation mode active.")
 
@@ -669,6 +676,7 @@ def build_arg_parser(settings: Settings) -> argparse.ArgumentParser:
     p.add_argument("--run", choices=["continuous"], default="continuous", help="Runtime mode.")
     p.add_argument("--duration", type=float, default=None, help="Run for N seconds then exit.")
     p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
+    p.add_argument("--preview", choices=["off", "none", "qtgl", "drm"], default="off", help="Camera preview mode.")
 
     p.add_argument("--enable-face", action="store_true", help="Enable LBPH recognition during runtime.")
     p.add_argument("--model", default=settings.model_path, help="LBPH model file.")
@@ -759,19 +767,42 @@ def dispatch_cli() -> None:
         train_lbph(Path(args.dataset), Path(args.model_out), Path(args.labels_out))
         return
 
-    asyncio.run(
-        run_sentinel(
-            simulate=bool(args.simulate),
-            duration=args.duration,
-            run_mode=str(args.run),
-            enable_face=bool(args.enable_face),
-            model=Path(args.model).expanduser(),
-            labels=Path(args.labels).expanduser(),
-            face_threshold=float(args.face_threshold),
-            unknown_alert=bool(args.unknown_alert),
-            log_level=str(args.log_level),
+    preview_camera: Optional[Any] = None
+    preview_mode = str(args.preview).lower()
+    if not args.simulate and preview_mode in {"qtgl", "drm"}:
+        from picamera2 import Picamera2, Preview  # type: ignore
+
+        preview_camera = Picamera2()
+        preview_camera.configure(preview_camera.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"}))
+        preview_target = Preview.QTGL if preview_mode == "qtgl" else Preview.DRM
+        preview_camera.start_preview(preview_target)
+        preview_camera.start()
+
+    try:
+        asyncio.run(
+            run_sentinel(
+                simulate=bool(args.simulate),
+                duration=args.duration,
+                run_mode=str(args.run),
+                enable_face=bool(args.enable_face),
+                model=Path(args.model).expanduser(),
+                labels=Path(args.labels).expanduser(),
+                face_threshold=float(args.face_threshold),
+                unknown_alert=bool(args.unknown_alert),
+                log_level=str(args.log_level),
+                picam2=preview_camera,
+            )
         )
-    )
+    finally:
+        if preview_camera is not None:
+            try:
+                preview_camera.stop_preview()
+            except Exception:
+                pass
+            try:
+                preview_camera.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
