@@ -502,7 +502,7 @@ class PiCameraMotionSensor:
         self._prev_gray = None
 
         self.picam2 = Picamera2()
-        self.picam2.configure(self.picam2.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"}))
+        self.picam2.configure(self.picam2.create_preview_configuration(main={"size": (640, 480), "format": "XRGB8888"}))
         self.picam2.start()
 
     def get_last_frame_rgb(self):
