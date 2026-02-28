@@ -52,12 +52,23 @@ Config fields:
   - `servo_left` / `servo_center` / `servo_right`
 - **Capture defaults**
   - `capture_count_default` (default `25`)
+- **Servo ramping**
+  - `ramp_step_deg` (default `2`)
+  - `ramp_step_ms` (default `20`)
 
 ## Usage
 ### Simulation (no Pi hardware)
 ```bash
 python sentinel.py --simulate --duration 60
 ```
+
+
+### Servo ramp test
+```bash
+python sentinel.py servo-test pan left
+python sentinel.py servo-test tilt up
+```
+These commands use ramped movement (small angle steps + async delays) instead of instant jumps.
 
 ### Face recognition (requires trained model)
 ```bash
